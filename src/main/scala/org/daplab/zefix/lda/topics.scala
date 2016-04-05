@@ -16,9 +16,15 @@ import org.apache.hadoop.io.NullWritable
 import org.apache.spark.{SparkConf, SparkContext}
 
 import scala.collection.mutable
-import org.apache.spark.mllib.clustering.LDA
+import org.apache.spark.mllib.clustering.{LDA, DistributedLDAModel}
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
 import org.apache.spark.rdd.RDD;
+
+import org.apache.log4j.Logger
+import org.apache.log4j.Level
+
+Logger.getLogger("org").setLevel(Level.OFF)
+Logger.getLogger("akka").setLevel(Level.OFF)
 
 
 object topics {
@@ -29,26 +35,34 @@ object topics {
       new SparkContext(conf)
     }
 
-    val path = "hdfs://daplab2/shared/zefix/company/2015/01/**/*.avro"
+    val path = "hdfs://daplab2/shared/zefix/company/2015/**/**/*.avro"
     val avroRDD = sc.hadoopFile[AvroWrapper[GenericRecord], NullWritable, AvroInputFormat[GenericRecord]](path)
 
-    val corpus: RDD[String] = avroRDD.map(l =>
-      new String(l._1.datum.get("purpose").toString())) //.collect().foreach(println)
+    val corpus: RDD[(String, String)] = avroRDD.map(l =>
+      (
+        new String(l._1.datum.get("name").toString()),
+        new String(l._1.datum.get("purpose").toString())
+      )
+    ).filter(_._2 contains " de ")
 
-    // Split each document into a sequence of terms (words)
-    val tokenized: RDD[Seq[String]] =
-      corpus.map(_.toLowerCase.split("\\s"))
-        .map(_.filter(_.length > 3)
-          .filter(_.forall(java.lang.Character.isLetter)))
+
+    corpus.collect().foreach(println)
+
+    val tokenized: RDD[Seq[String]] = corpus.map(_._2.toLowerCase.split("\\s"))
+      .map(_.filter(_.length > 3).filter(_.forall(java.lang.Character.isLetter)))
 
     // Choose the vocabulary.
     //   termCounts: Sorted list of (term, termCount) pairs
     val termCounts: Array[(String, Long)] =
       tokenized.flatMap(_.map(_ -> 1L)).reduceByKey(_ + _).collect().sortBy(-_._2)
     //   vocabArray: Chosen vocab (removing common terms)
+
+    val stopWords = Array("de", "des", "d", "un", "une", "le", "la", "les", "leur", "leurs", "mon", "ton", "son", "pour", "dans", "toute", "tout", "tous", "toutes", "ainsi", "je", "elle", "il", "tu", "nous", "vous", "ils", "elles", "sous", "sont", "a", "ont", "on", "autres", "autre")
     val numStopwords = 20
+
     val vocabArray: Array[String] =
-      termCounts.takeRight(termCounts.size - numStopwords).map(_._1)
+      termCounts.takeRight(termCounts.size - numStopwords).map(_._1).filter(!stopWords.contains(_))
+
     //   vocab: Map term -> term index
     val vocab: Map[String, Int] = vocabArray.zipWithIndex.toMap
 
@@ -74,6 +88,7 @@ object topics {
 
     // Print topics, showing top-weighted 10 terms for each topic.
     val topicIndices = ldaModel.describeTopics(maxTermsPerTopic = 10)
+
     topicIndices.foreach { case (terms, termWeights) =>
       println("TOPIC:")
       terms.zip(termWeights).foreach { case (term, weight) =>
@@ -81,6 +96,9 @@ object topics {
       }
       println()
     }
+
+    corpus.saveAsTextFile("hdfs://daplab2/user/acholleton/zefix-ml/corpus")
+    ldaModel.save(sc, "hdfs://daplab2/user/acholleton/zefix-ml/ldaModel")
 
   }
 }
